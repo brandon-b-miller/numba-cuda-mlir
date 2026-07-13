@@ -23,6 +23,8 @@ static PyModuleDef module_def = {
 };
 
 PyMODINIT_FUNC PyInit__cext() {
+    // Resolves driver availability but never fails the import when the driver is
+    // absent (e.g. CPU-only machines); the error is deferred to first CUDA use.
     if (!cuda_loader_init())
         return nullptr;
 
@@ -43,6 +45,12 @@ PyMODINIT_FUNC PyInit__cext() {
         return nullptr;
 
     if (!llvm_downgrade_init(m.get()))
+        return nullptr;
+
+    // Expose driver availability so the Python layer can mirror
+    // numba.cuda.is_available() instead of assuming a driver is present.
+    if (PyModule_AddIntConstant(m.get(), "cuda_available",
+                                cuda_is_available() ? 1 : 0) < 0)
         return nullptr;
 
     return m.release();
