@@ -56,7 +56,12 @@ def stage(src: Path, dest: Path) -> None:
     """Replace `dest` with a copy of `src`, which must exist."""
     if not src.exists():
         raise RuntimeError(f"expected to package {src}, which does not exist")
-    if dest.exists():
+    # `dest` is a file for mlir-tblgen and each .a, so this cannot assume a
+    # directory: setup.py runs twice per `python -m build` (metadata, then
+    # wheel), and the second pass finds whatever the first one staged.
+    if dest.is_symlink() or dest.is_file():
+        dest.unlink()
+    elif dest.is_dir():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     if src.is_dir():
