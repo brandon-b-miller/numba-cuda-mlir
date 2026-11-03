@@ -76,6 +76,23 @@ def _created_inlined_var_name(function_name, var_name):
     return new_name
 
 
+def _record_inlined_var_source(caller_scope, callee_scope, new_name, var_name):
+    """Record the source name of a callee variable renamed for inlining.
+
+    ``_created_inlined_var_name`` folds ``.`` and ``$`` into ``_`` and ``_v``,
+    which cannot be undone: a source variable named ``temp_a`` is
+    indistinguishable from a mangled ``temp.a``. Keeping the pre-rename name
+    next to the generated one lets consumers recover it exactly.
+
+    Inlining nests, so ``var_name`` may itself be a name an earlier inline
+    generated; resolve through the callee's own record to reach the name as it
+    was written in source.
+    """
+    caller_scope.inlined_source_names[new_name] = callee_scope.inlined_source_names.get(
+        var_name, var_name
+    )
+
+
 class InlineClosureCallPass:
     """InlineClosureCallPass class looks for direct calls to locally defined
     closures, and inlines the body of the closure function to the call site.
@@ -371,6 +388,7 @@ class InlineWorker:
                 inlined_name = _created_inlined_var_name(callee_ir.func_id.unique_name, var.name)
                 # Update the caller scope with the new names
                 new_var = scope.redefine(inlined_name, loc=var.loc)
+                _record_inlined_var_source(scope, callee_scope, new_var.name, var.name)
                 # Also update the callee scope with the new names. Should the
                 # type and call maps need updating (which requires SSA form) the
                 # transformation to SSA is valid as the IR object is internally
@@ -603,6 +621,7 @@ def inline_closure_call(
         if var.name not in callee_code.co_freevars:
             inlined_name = _created_inlined_var_name(callee_ir.func_id.unique_name, var.name)
             new_var = scope.redefine(inlined_name, loc=var.loc)
+            _record_inlined_var_source(scope, callee_scope, new_var.name, var.name)
             var_dict[var.name] = new_var
     debug_print("var_dict = ", var_dict)
     replace_vars(callee_blocks, var_dict)

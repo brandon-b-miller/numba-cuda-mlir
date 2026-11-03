@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import re
+
 import numpy as np
 from enum import IntEnum
 from types import SimpleNamespace
@@ -928,6 +930,99 @@ def test_llvm_ir_subprogram_name():
         """,
         llvm_ir,
     )
+
+
+# Two levels of device function, each small enough that Numba's IR inliner
+# accepts it, so d_level2 is inlined into d_level1 and the result is inlined
+# into the kernel. The kernel's own variables are named distinctly from the
+# callees' so a mix-up is visible.
+@cuda.jit(device=True, inline="always")
+def d_level2(y):
+    return y * 3
+
+
+@cuda.jit(device=True, inline="always")
+def d_level1(x):
+    temp_a = x + 1
+    return d_level2(temp_a)
+
+
+def k_two_level_inline(out, param_x):
+    idx = cuda.grid(1)
+    result_2level = d_level1(param_x)
+    out[idx] = result_2level
+
+
+_TWO_LEVEL_SIG = types.void(types.int32[:], types.int32)
+
+
+def _di_local_variable_names(mlir):
+    return re.findall(r'di_local_variable<[^>]*name = "([^"]*)"', mlir)
+
+
+def _compile_two_level_inline():
+    return compiler.compile_mlir(k_two_level_inline, _TWO_LEVEL_SIG, debug=True, opt=False)
+
+
+def test_mlir_inlined_var_keeps_source_name():
+    """Variables of an inlined device function keep the name the user wrote.
+
+    The IR inliner renames callee variables to caller-unique names, turning
+    ``x`` into ``d_level1_v<id>_x``, so a debugger would otherwise show
+    identifiers that appear nowhere in the source.
+    """
+    names = _di_local_variable_names(_compile_two_level_inline())
+
+    assert {"x", "temp_a", "y"} <= set(names), names
+    mangled = [n for n in names if "d_level1" in n or "d_level2" in n]
+    assert not mangled, names
+
+
+def test_mlir_inlined_temporaries_are_not_debug_variables():
+    """Temporaries of an inlined device function are not user variables.
+
+    Numba names them with a leading ``$`` (``$const6.1``, ``$20return_value``),
+    which the inliner's rename turns into ``_v``; they must stay out of the
+    debug info either way.
+    """
+    names = _di_local_variable_names(_compile_two_level_inline())
+
+    temp_markers = ("const", "return_value", "binop", "call", "load_global")
+    leaked = [n for n in names if any(marker in n for marker in temp_markers)]
+    assert not leaked, names
+
+
+def test_mlir_caller_vars_survive_inlining():
+    """The kernel's own variables are unaffected by renaming inlined callees."""
+    names = _di_local_variable_names(_compile_two_level_inline())
+
+    assert {"out", "param_x", "idx", "result_2level"} <= set(names), names
+
+
+@cuda.jit(device=True, inline="always")
+def d_reassign(z):
+    acc = z + 1
+    acc = acc * 2
+    return acc
+
+
+def k_reassigned_inline(out, param_z):
+    out[0] = d_reassign(param_z)
+
+
+def test_mlir_inlined_ssa_versions_share_one_variable():
+    """SSA versions of an inlined variable still collapse to one entry.
+
+    ``acc`` is assigned twice, so SSA splits it into ``acc``, ``acc.1``, ...
+    under its renamed form; all of them must describe the single source
+    variable rather than one entry each.
+    """
+    mlir = compiler.compile_mlir(
+        k_reassigned_inline, types.void(types.int32[:], types.int32), debug=True, opt=False
+    )
+    names = _di_local_variable_names(mlir)
+
+    assert names.count("acc") == 1, names
 
 
 # struct Node { int32 value; Node *next; }. MLIR attributes are immutable and

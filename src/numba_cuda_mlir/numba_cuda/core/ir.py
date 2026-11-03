@@ -1220,6 +1220,12 @@ class Scope(EqualityCheckMixin):
     - loc: Loc
         Start of scope location
 
+    - inlined_source_names: dict
+        Maps the name of a variable that inlining moved into this scope to the
+        name it had in the inlined function's source. The rename applied by
+        ``_created_inlined_var_name`` is not invertible, so anything that needs
+        the source name (debug info) reads it from here.
+
     """
 
     def __init__(self, parent, loc):
@@ -1231,6 +1237,7 @@ class Scope(EqualityCheckMixin):
         self.loc = loc
         self.redefined = defaultdict(int)
         self.var_redefinitions = defaultdict(set)
+        self.inlined_source_names = {}
 
     def define(self, name, loc):
         """

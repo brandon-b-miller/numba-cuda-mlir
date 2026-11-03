@@ -329,14 +329,34 @@ class MLIRLower(object):
                     arg_index=arg_idx + 1,  # DWARF arg indices are 1-based
                 )
 
+        inlined_source_names = self._inlined_source_names()
         seen = set(self.fndesc.args)
         for var_name, numba_type in typemap.items():
-            if var_name in seen or var_name.startswith("$") or "." in var_name:
+            if var_name in seen:
+                continue
+            # Inlining renamed the callee's variables to caller-unique names, so
+            # the IR name is no longer what the user wrote. The name to show is
+            # the one the inliner recorded; var_name stays the lookup key.
+            source_name = inlined_source_names.get(var_name, var_name)
+            # Numba marks its own temporaries with a leading "$" and its SSA
+            # versions with a trailing ".N". Test the source name: the inliner's
+            # rename folds both markers into "_", so a renamed temporary looks
+            # like a user variable by the time it reaches the typemap.
+            if source_name.startswith("$") or "." in source_name:
                 continue
             seen.add(var_name)
             var_loc = self._find_var_def_line(var_name)
             numba_type = self._poly_dbg_types.get(var_name, numba_type)
-            self._di_builder.add_local_variable(var_name, var_loc, numba_type)
+            self._di_builder.add_local_variable(
+                var_name, var_loc, numba_type, source_name=source_name
+            )
+
+    def _inlined_source_names(self):
+        """Map IR names of inlined variables to the names used in their source."""
+        source_names = {}
+        for block in self.blocks.values():
+            source_names.update(block.scope.inlined_source_names)
+        return source_names
 
     def _return_loc(self):
         """Locate the first return statement, for diagnostics about the return type."""

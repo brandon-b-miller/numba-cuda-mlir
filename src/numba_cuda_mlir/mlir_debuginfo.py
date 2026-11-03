@@ -13,10 +13,14 @@ from numba_cuda_mlir.numba_cuda.types.ext_types import Bfloat16, GridGroup
 
 
 class _DILocalVarInfo(NamedTuple):
+    # ``name`` is the Numba IR name, used to look the variable up from lowering;
+    # ``source_name`` is what the user wrote and is what DW_AT_name gets. They
+    # differ for variables the IR inliner renamed.
     name: str
     line: int
     type_str: str
     arg_index: int | None
+    source_name: str
 
 
 _BYTE_SIZE_BITS = 8
@@ -514,8 +518,13 @@ class DIBuilder:
             f">"
         )
 
-    def add_local_variable(self, name, line, numba_type, *, arg_index=None):
-        """Register a local variable for debug info emission."""
+    def add_local_variable(self, name, line, numba_type, *, arg_index=None, source_name=None):
+        """Register a local variable for debug info emission.
+
+        ``name`` is the Numba IR name callers use to look the variable up again.
+        ``source_name`` is emitted as the variable's name and defaults to
+        ``name``; pass it when the IR name is not what the user wrote.
+        """
         if not self.valid:
             return
         type_str = _numba_type_to_di_type_str(numba_type)
@@ -523,7 +532,9 @@ class DIBuilder:
             return
         if arg_index is not None:
             self.arg_names.add(name)
-        self._local_vars.append(_DILocalVarInfo(name, line, type_str, arg_index))
+        self._local_vars.append(
+            _DILocalVarInfo(name, line, type_str, arg_index, source_name or name)
+        )
 
     def build(self):
         """Parse all DI metadata in a single call for consistent distinct IDs.
@@ -540,7 +551,7 @@ class DIBuilder:
             var_str = (
                 f"#llvm.di_local_variable<"
                 f"scope = {self._di_sp_str}, "
-                f"name = {_mlir_string_attr(var.name)}{arg_field}, "
+                f"name = {_mlir_string_attr(var.source_name)}{arg_field}, "
                 f"file = {self._di_file_str}, "
                 f"line = {var.line}, "
                 f"type = {var.type_str}"
