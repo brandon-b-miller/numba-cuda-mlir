@@ -719,15 +719,21 @@ LLVMMetadataRef LLVM70IRBuilder::createDIFile(const char *filename,
   return fnDIBuilderCreateFile(diBuilder, filename, filenameLen, directory,
                                directoryLen);
 }
-LLVMMetadataRef LLVM70IRBuilder::createDICompileUnit(LLVMMetadataRef file,
-                                                     bool fullDebug) {
+LLVMMetadataRef
+LLVM70IRBuilder::createDICompileUnit(LLVMMetadataRef file, bool fullDebug,
+                                     LLVMDWARFSourceLanguage sourceLanguage,
+                                     const char *producer,
+                                     size_t producerLen) {
   // LLVM 7 accepts DebugDirectivesOnly (3), but its IR printer leaves the
   // emission-kind name empty.
   auto emissionKind = fullDebug ? LLVMDWARFEmissionFull
                                 : static_cast<LLVMDWARFEmissionKind>(3);
+  // There is no nameTableKind parameter here, so DW_AT_GNU_pubnames cannot be
+  // requested: LLVM 7's DIBuilder takes it as a defaulted C++ argument that
+  // this, the only compile unit entry point in the C API, leaves false.
   return fnDIBuilderCreateCompileUnit(
-      diBuilder, LLVMDWARFSourceLanguageC, file,
-      "llvm70", 6, /*isOptimized=*/false, /*Flags=*/"", 0,
+      diBuilder, sourceLanguage, file,
+      producer, producerLen, /*isOptimized=*/false, /*Flags=*/"", 0,
       /*RuntimeVer=*/0, /*SplitName=*/"", 0,
       emissionKind, /*DWOId=*/0,
       /*SplitDebugInlining=*/false, /*DebugInfoForProfiling=*/false);

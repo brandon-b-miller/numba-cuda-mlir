@@ -114,6 +114,9 @@ private:
 
   // Debug info state
   LLVMMetadataRef diCompileUnit = nullptr;
+  // The compile unit's own file, and the fallback for debug metadata that
+  // names no file of its own.
+  LLVMMetadataRef diMainFile = nullptr;
   LLVMMetadataRef diSubroutineType = nullptr;
   llvm::StringMap<LLVMMetadataRef> diFileCache;
   LLVMMetadataRef currentSubprogram = nullptr;
@@ -126,11 +129,16 @@ private:
   // self-references reached again after the composite is complete.
   llvm::DenseMap<mlir::Attribute, LLVMMetadataRef> diRecursiveTypes;
 
-  LLVMMetadataRef getOrCreateDIFile(llvm::StringRef filename);
+  /// DIFile for `filename`, which may carry its own directory. `directory`
+  /// supplies one when it does not.
+  LLVMMetadataRef getOrCreateDIFile(llvm::StringRef filename,
+                                    llvm::StringRef directory = ".");
   void setDebugLocFromOp(mlir::Operation *op);
   std::tuple<llvm::StringRef, unsigned, unsigned>
   extractFileLineCol(mlir::Location loc);
   mlir::LLVM::DISubprogramAttr extractSubprogram(mlir::Location loc);
+  mlir::LLVM::DICompileUnitAttr
+  extractCompileUnit(mlir::gpu::GPUModuleOp gpuMod);
 
   // Map an MLIR value to its old-LLVM counterpart.
   void mapValue(mlir::Value v, LLVMValueRef lv) { valueMap[v] = lv; }

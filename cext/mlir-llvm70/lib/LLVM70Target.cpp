@@ -296,6 +296,26 @@ LLVMValueRef MLIRToLLVM70::lookupValueAsDeclared(Value v) {
 // Debug info helpers
 //===----------------------------------------------------------------------===//
 
+// MLIR stores the DWARF constant, but LLVMDIBuilderCreateCompileUnit wants an
+// index into LLVMDWARFSourceLanguage and LLVM keeps the mapping private. Those
+// enumerators are generated from Dwarf.def, which lists languages in DW_LANG
+// numeric order, so over the unbroken DW_LANG_C89..DW_LANG_Python run the index
+// is just the constant minus one. The DWARF 5 additions past that run are
+// deliberately not translated: they sit at different indices in LLVM 7 than in
+// the headers this file is built against, and LLVM 7 treats an index it does
+// not recognise as unreachable.
+static LLVMDWARFSourceLanguage toLLVMSourceLanguage(unsigned sourceLanguage) {
+  static_assert(LLVMDWARFSourceLanguageC89 == 0 &&
+                    LLVMDWARFSourceLanguagePython == 19,
+                "LLVMDWARFSourceLanguage no longer starts with the "
+                "DW_LANG_C89..DW_LANG_Python run");
+  if (sourceLanguage < llvm::dwarf::DW_LANG_C89 ||
+      sourceLanguage > llvm::dwarf::DW_LANG_Python)
+    return LLVMDWARFSourceLanguageC;
+  return static_cast<LLVMDWARFSourceLanguage>(sourceLanguage -
+                                              llvm::dwarf::DW_LANG_C89);
+}
+
 std::tuple<llvm::StringRef, unsigned, unsigned>
 MLIRToLLVM70::extractFileLineCol(Location loc) {
   if (auto flc = dyn_cast<FileLineColLoc>(loc))
@@ -330,20 +350,39 @@ LLVM::DISubprogramAttr MLIRToLLVM70::extractSubprogram(Location loc) {
   return {};
 }
 
-LLVMMetadataRef MLIRToLLVM70::getOrCreateDIFile(llvm::StringRef filename) {
-  auto it = diFileCache.find(filename);
-  if (it != diFileCache.end())
-    return it->second;
+// The frontend's DICompileUnitAttr, reached through the DISubprogramAttr that
+// rides in the metadata slot of a module-level op's location.
+LLVM::DICompileUnitAttr
+MLIRToLLVM70::extractCompileUnit(gpu::GPUModuleOp gpuMod) {
+  for (Operation &op : *gpuMod.getBody())
+    if (LLVM::DISubprogramAttr sp = extractSubprogram(op.getLoc()))
+      if (LLVM::DICompileUnitAttr cu = sp.getCompileUnit())
+        return cu;
+  return {};
+}
 
-  // Split filename into directory and basename.
+LLVMMetadataRef MLIRToLLVM70::getOrCreateDIFile(llvm::StringRef filename,
+                                                llvm::StringRef directory) {
+  // Split a directory off filename when it carries one; a bare basename takes
+  // the caller's.
   auto [dir, base] = filename.rsplit('/');
   if (base.empty()) {
     base = dir;
-    dir = ".";
+    dir = directory;
   }
+
+  // A bare basename says nothing about which directory it sits in, so the
+  // cache has to key on both halves.
+  llvm::SmallString<128> key(dir);
+  key += '/';
+  key += base;
+  auto it = diFileCache.find(key);
+  if (it != diFileCache.end())
+    return it->second;
+
   LLVMMetadataRef file =
       b.createDIFile(base.data(), base.size(), dir.data(), dir.size());
-  diFileCache[filename] = file;
+  diFileCache[key] = file;
   return file;
 }
 
@@ -405,13 +444,30 @@ llvm::Error MLIRToLLVM70::translate(gpu::GPUModuleOp gpuMod, int debugLevel,
       });
     }
     b.initDebugInfo();
-    constexpr llvm::StringLiteral moduleName("llvm70_module");
-    constexpr llvm::StringLiteral moduleDir(".");
-    LLVMMetadataRef mainFile =
-        b.createDIFile(moduleName.data(), moduleName.size(),
-                       moduleDir.data(), moduleDir.size());
-    diCompileUnit = b.createDICompileUnit(mainFile, needFullDebug);
-    diSubroutineType = b.createDISubroutineType(mainFile);
+    // Describe the compile unit the way the frontend asked. Modules without
+    // debug metadata, such as hand-written IR run through the standalone tool,
+    // keep the placeholders because there is nothing better to say.
+    llvm::StringRef moduleName("llvm70_module");
+    llvm::StringRef moduleDir(".");
+    llvm::StringRef producer("llvm70");
+    LLVMDWARFSourceLanguage sourceLanguage = LLVMDWARFSourceLanguageC;
+    if (LLVM::DICompileUnitAttr cuAttr = extractCompileUnit(gpuMod)) {
+      if (LLVM::DIFileAttr fileAttr = cuAttr.getFile()) {
+        if (fileAttr.getName() && !fileAttr.getName().getValue().empty())
+          moduleName = fileAttr.getName().getValue();
+        if (fileAttr.getDirectory() &&
+            !fileAttr.getDirectory().getValue().empty())
+          moduleDir = fileAttr.getDirectory().getValue();
+      }
+      if (cuAttr.getProducer() && !cuAttr.getProducer().getValue().empty())
+        producer = cuAttr.getProducer().getValue();
+      sourceLanguage = toLLVMSourceLanguage(cuAttr.getSourceLanguage());
+    }
+    diMainFile = getOrCreateDIFile(moduleName, moduleDir);
+    diCompileUnit =
+        b.createDICompileUnit(diMainFile, needFullDebug, sourceLanguage,
+                              producer.data(), producer.size());
+    diSubroutineType = b.createDISubroutineType(diMainFile);
   }
 
   // First pass: declare all functions and globals (forward references)
@@ -568,8 +624,7 @@ llvm::Error MLIRToLLVM70::translateFuncOp(Operation *op) {
   if (diCompileUnit) {
     auto [filename, line, col] = extractFileLineCol(funcOp.getLoc());
     LLVMMetadataRef diFile =
-        filename.empty() ? getOrCreateDIFile("llvm70_module")
-                         : getOrCreateDIFile(filename);
+        filename.empty() ? diMainFile : getOrCreateDIFile(filename);
     // Retrieve source name from subprogram, if any.
     std::string linkageName = funcOp.getName().str();
     llvm::StringRef name = linkageName;
@@ -2711,9 +2766,15 @@ LLVMMetadataRef MLIRToLLVM70::opaqueDIType(uint64_t sizeInBits) {
 }
 
 LLVMMetadataRef MLIRToLLVM70::diFileOf(LLVM::DIFileAttr fileAttr) {
-  if (fileAttr && fileAttr.getName())
-    return getOrCreateDIFile(fileAttr.getName().getValue());
-  return getOrCreateDIFile("llvm70_module");
+  // Types and members often name no file; they belong to the compile unit's.
+  if (!fileAttr || !fileAttr.getName())
+    return diMainFile;
+  // The frontend splits the source path, so the directory has to be carried
+  // across too: on its own the basename resolves against DW_AT_comp_dir.
+  llvm::StringRef directory = ".";
+  if (fileAttr.getDirectory() && !fileAttr.getDirectory().getValue().empty())
+    directory = fileAttr.getDirectory().getValue();
+  return getOrCreateDIFile(fileAttr.getName().getValue(), directory);
 }
 
 LLVMMetadataRef MLIRToLLVM70::convertDIBasicType(LLVM::DIBasicTypeAttr attr) {
@@ -2891,9 +2952,7 @@ llvm::Error MLIRToLLVM70::emitDbgIntrinsic(Operation *op, LLVMValueRef val,
   llvm::StringRef name = nameAttr.getValue();
 
   unsigned line = varInfo.getLine();
-  LLVMMetadataRef diFile = varInfo.getFile()
-      ? getOrCreateDIFile(varInfo.getFile().getName().getValue())
-      : getOrCreateDIFile("llvm70_module");
+  LLVMMetadataRef diFile = diFileOf(varInfo.getFile());
 
   LLVMMetadataRef diType = getOrCreateDIType(varInfo.getType());
   LLVMMetadataRef scope = currentSubprogram ? currentSubprogram : diCompileUnit;

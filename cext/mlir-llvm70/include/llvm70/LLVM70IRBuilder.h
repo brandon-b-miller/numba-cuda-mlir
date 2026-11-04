@@ -225,8 +225,9 @@ public:
   void finalizeDebugInfo();
   LLVMMetadataRef createDIFile(const char *filename, size_t filenameLen,
                                const char *directory, size_t directoryLen);
-  LLVMMetadataRef createDICompileUnit(LLVMMetadataRef file,
-                                      bool fullDebug = false);
+  LLVMMetadataRef createDICompileUnit(LLVMMetadataRef file, bool fullDebug,
+                                      LLVMDWARFSourceLanguage sourceLanguage,
+                                      const char *producer, size_t producerLen);
   LLVMMetadataRef createDISubroutineType(LLVMMetadataRef file);
   LLVMMetadataRef createDIFunction(LLVMMetadataRef scope, const char *name,
                                    size_t nameLen, const char *linkageName,

@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import re
+
 import numpy as np
 from enum import IntEnum
 from types import SimpleNamespace
@@ -928,6 +931,49 @@ def test_llvm_ir_subprogram_name():
         """,
         llvm_ir,
     )
+
+
+def test_llvm_ir_compile_unit_from_frontend():
+    """The compile unit carries the frontend's producer, language and file."""
+
+    @cuda.jit(debug=True, opt=False)
+    def k_cu(out, a):
+        out[0] = a + 1
+
+    sig = (types.int32[:], types.int32)
+    k_cu.compile(types.void(*sig))
+    llvm_ir = k_cu.inspect_llvm(sig)
+
+    directory, filename = os.path.split(os.path.abspath(__file__))
+    testing.filecheck(
+        f"""
+        CHECK: !DICompileUnit(language: DW_LANG_C_plus_plus, file: ![[F:[0-9]+]],
+        CHECK-SAME: producer: "clang (numba-cuda-mlir)"
+        CHECK: ![[F]] = !DIFile(filename: "{filename}", directory: "{directory}")
+        """,
+        llvm_ir,
+    )
+
+
+def test_llvm_ir_debug_files_keep_directory():
+    """Every file in the debug metadata names the source and its real directory.
+
+    A file whose directory is "." resolves against DW_AT_comp_dir, so a
+    placeholder on either side composes into a nonsense "././<name>".
+    """
+
+    @cuda.jit(debug=True, opt=False)
+    def k_var_file(out, a):
+        c = a + 1
+        out[0] = c
+
+    sig = (types.int32[:], types.int32)
+    k_var_file.compile(types.void(*sig))
+    llvm_ir = k_var_file.inspect_llvm(sig)
+
+    directory, filename = os.path.split(os.path.abspath(__file__))
+    found = set(re.findall(r'!DIFile\(filename: "(.*?)", directory: "(.*?)"\)', llvm_ir))
+    assert found == {(filename, directory)}, f"unexpected DIFile entries: {found}"
 
 
 # struct Node { int32 value; Node *next; }. MLIR attributes are immutable and
