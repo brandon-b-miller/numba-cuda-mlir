@@ -15,7 +15,12 @@ regex_pattern = r'In function [\'"]test_exc[\'"], file [\:\.\/\\\-a-zA-Z_0-9]+, 
 
 
 class TestUserExc(NumbaCUDATestCase):
-    @pytest.mark.xfail(True, reason="ICE")
+    # Not an internal compiler error: the kernel compiles and runs. Only the
+    # five classes in KERNEL_ERROR_CODES survive the round trip through the
+    # device error code, so a user-defined class arrives on the host as
+    # `RuntimeError: Runtime error in kernel`, losing both the class and the
+    # location text this test asserts on.
+    @pytest.mark.xfail(True, reason="Kernel exception class collapses to RuntimeError")
     def test_user_exception(self):
         @numba_cuda_mlir.cuda.jit("void(int32)", debug=True, opt=False)
         def test_exc(x):
