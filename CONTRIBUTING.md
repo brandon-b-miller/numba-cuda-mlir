@@ -61,6 +61,33 @@ To dump Numba IR and MLIR to stderr before the MLIR-to-NVVM pipeline, enable `du
 To print the full list of available debug options, enable `help` in the `@cuda.jit()` decorator options, e.g. `@cuda.jit(help=True)`.
 
 
+## Cutting a release
+
+Releases are tag-triggered, but the tag does **not** build anything. `publish.yaml`
+looks up the CI run that already built and validated the tagged commit and
+publishes those wheels, so the tag must point at a commit that already has a
+green run. The order matters:
+
+1. Open a PR bumping the version in two places:
+   - `src/numba_cuda_mlir/VERSION`
+   - `docs/versions.json`, adding an entry for the new version below `latest`
+2. Merge it to `main`.
+3. Wait for the **push-triggered** `ci.yaml` run on `main` to go green. A green
+   run on the PR is not enough: `ci/tools/lookup-run-id` accepts a run only if
+   its `conclusion` is `success`, its `event` is `push`, and its `headBranch`
+   is `main`. Tagging before that run finishes, or tagging a commit whose only
+   green run came from the PR, fails the release with "No successful
+   main-branch run found for tag".
+4. Tag that exact commit `v<version>` and push the tag. The tag must match
+   `v<major>.<minor>.<patch>`, and the version it encodes is checked against
+   the wheels by `ci/tools/validate-release-wheels`.
+
+From there `publish.yaml` downloads the validated wheels, publishes them to
+PyPI, and creates the GitHub release with generated notes if one does not
+already exist. Nothing is recompiled, so a release can only ever ship the
+artifacts that `main` CI already tested.
+
+
 
 ## Signing Your Work
 
