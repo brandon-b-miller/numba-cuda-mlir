@@ -56,6 +56,22 @@ if [ ! -d "${LLVM_SRC}/llvm" ]; then
     git -C "${LLVM_SRC}" checkout -q FETCH_HEAD
 fi
 
+# Patches carried against the pinned LLVM, applied in name order. They are part
+# of the cache key (ci/llvm-cache-key.sh), so editing one invalidates the
+# cached artifact instead of silently reusing an unpatched build. LLVM_MODERN_SRC
+# may point at a tree that already has them, hence the reverse-apply check.
+shopt -s nullglob
+llvm_patches=("${SCRIPT_DIR}/patches/llvm"/*.patch)
+shopt -u nullglob
+for patch in "${llvm_patches[@]}"; do
+    if git -C "${LLVM_SRC}" apply --check --reverse "${patch}" 2>/dev/null; then
+        echo ">>> Already applied: $(basename "${patch}")"
+    else
+        echo ">>> Applying $(basename "${patch}")"
+        git -C "${LLVM_SRC}" apply "${patch}"
+    fi
+done
+
 # Require sccache for compiler caching
 command -v sccache &>/dev/null || { echo "ERROR: sccache not found"; exit 1; }
 CMAKE_C_COMPILER_LAUNCHER="$(cmake_path "$(command -v sccache)")"

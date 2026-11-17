@@ -53,9 +53,13 @@ case "${kind}" in
     modern)
         py_tag="${3:-}"
         [[ -n "${py_tag}" ]] || usage
+        shopt -s nullglob
+        llvm_patches=("${SCRIPT_DIR}/patches/llvm"/*.patch)
+        shopt -u nullglob
         build_hash="$(hash_inputs \
             "${SCRIPT_DIR}/build-llvm-modern.sh" \
-            "${SCRIPT_DIR}/../cext/mlir-python/CMakeLists.txt")"
+            "${SCRIPT_DIR}/../cext/mlir-python/CMakeLists.txt" \
+            "${llvm_patches[@]}")"
         echo "llvm-modern-${os_tag}-$(cache_arch "${host_platform}")-${py_tag}-$(cache_version "${LLVM_MODERN_COMMIT}")-${build_hash}"
         ;;
     llvm7)
