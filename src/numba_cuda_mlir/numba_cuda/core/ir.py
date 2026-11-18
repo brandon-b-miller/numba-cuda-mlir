@@ -11,6 +11,7 @@ import re
 import sys
 import operator
 from types import FunctionType, BuiltinFunctionType
+from typing import NamedTuple
 from functools import total_ordering
 from io import StringIO
 
@@ -1207,6 +1208,32 @@ class Var(EqualityCheckMixin, AbstractRHS):
         return out
 
 
+class InlineFrame(NamedTuple):
+    """One level of a call that inlining erased.
+
+    Enough to rebuild a DWARF inlined frame: which function the code came from,
+    and where it was called. ``parent`` chains outward through nested inlines,
+    so the frame nearest the variable is first and the outermost call last.
+
+    Frames are compared by value, so every variable from the same inline
+    carries an equal frame and consumers can group on it.
+    """
+
+    func_name: str
+    func_file: str
+    func_line: int
+    call_file: str
+    call_line: int
+    parent: "InlineFrame | None" = None
+
+
+class InlinedVar(NamedTuple):
+    """A variable inlining moved, and what it looked like before the move."""
+
+    source_name: str
+    frame: InlineFrame
+
+
 class Scope(EqualityCheckMixin):
     """
     Attributes
@@ -1220,6 +1247,13 @@ class Scope(EqualityCheckMixin):
     - loc: Loc
         Start of scope location
 
+    - inlined_vars: dict
+        Maps the name of a variable that inlining moved into this scope to an
+        ``InlinedVar`` describing where it came from. Inlining destroys both
+        facts a debugger needs about such a variable: the rename applied by
+        ``_created_inlined_var_name`` is not invertible, and the frame it
+        belonged to stops existing. Anything that needs either reads it here.
+
     """
 
     def __init__(self, parent, loc):
@@ -1231,6 +1265,7 @@ class Scope(EqualityCheckMixin):
         self.loc = loc
         self.redefined = defaultdict(int)
         self.var_redefinitions = defaultdict(set)
+        self.inlined_vars = {}
 
     def define(self, name, loc):
         """

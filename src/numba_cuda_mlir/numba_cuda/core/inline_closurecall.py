@@ -76,6 +76,51 @@ def _created_inlined_var_name(function_name, var_name):
     return new_name
 
 
+def _inline_frame(callee_ir, call_loc):
+    """The frame a variable loses when `callee_ir` is inlined at `call_loc`.
+
+    The callee is placed at its ``loc`` rather than at ``func_id.firstlineno``,
+    which points at the first decorator: lowering puts a function's subprogram
+    at its ``loc``, and an inlined frame should sit where a real one would.
+    """
+    return ir.InlineFrame(
+        func_name=callee_ir.func_id.func_name,
+        func_file=callee_ir.loc.filename,
+        func_line=callee_ir.loc.line,
+        call_file=call_loc.filename,
+        call_line=call_loc.line,
+    )
+
+
+def _nest_frame(inner, outer):
+    """Hang `outer` off the outermost end of `inner`'s chain."""
+    if inner.parent is None:
+        return inner._replace(parent=outer)
+    return inner._replace(parent=_nest_frame(inner.parent, outer))
+
+
+def _record_inlined_var(caller_scope, callee_scope, new_name, var_name, frame):
+    """Record where a callee variable came from before inlining renamed it.
+
+    Two facts are destroyed here and neither can be recovered later.
+    ``_created_inlined_var_name`` folds ``.`` and ``$`` into ``_`` and ``_v``,
+    which is not invertible: a source variable named ``temp_a`` is
+    indistinguishable from a mangled ``temp.a``. And the callee stops existing,
+    so nothing downstream can tell which function the variable belonged to.
+
+    Inlining nests, so ``var_name`` may itself be a name an earlier inline
+    generated. Resolve through the callee's own record to reach the source name,
+    and hang this call onto the end of the chain the callee already had.
+    """
+    prior = callee_scope.inlined_vars.get(var_name)
+    if prior is None:
+        caller_scope.inlined_vars[new_name] = ir.InlinedVar(var_name, frame)
+    else:
+        caller_scope.inlined_vars[new_name] = ir.InlinedVar(
+            prior.source_name, _nest_frame(prior.frame, frame)
+        )
+
+
 class InlineClosureCallPass:
     """InlineClosureCallPass class looks for direct calls to locally defined
     closures, and inlines the body of the closure function to the call site.
@@ -366,11 +411,13 @@ class InlineWorker:
         assert len(callee_scopes) == 1
         callee_scope = callee_scopes[0]
         var_dict = {}
+        frame = _inline_frame(callee_ir, instr.loc)
         for var in tuple(callee_scope.localvars._con.values()):
             if var.name not in callee_freevars:
                 inlined_name = _created_inlined_var_name(callee_ir.func_id.unique_name, var.name)
                 # Update the caller scope with the new names
                 new_var = scope.redefine(inlined_name, loc=var.loc)
+                _record_inlined_var(scope, callee_scope, new_var.name, var.name, frame)
                 # Also update the callee scope with the new names. Should the
                 # type and call maps need updating (which requires SSA form) the
                 # transformation to SSA is valid as the IR object is internally
@@ -599,10 +646,12 @@ def inline_closure_call(
     assert len(callee_scopes) == 1
     callee_scope = callee_scopes[0]
     var_dict = {}
+    frame = _inline_frame(callee_ir, instr.loc)
     for var in callee_scope.localvars._con.values():
         if var.name not in callee_code.co_freevars:
             inlined_name = _created_inlined_var_name(callee_ir.func_id.unique_name, var.name)
             new_var = scope.redefine(inlined_name, loc=var.loc)
+            _record_inlined_var(scope, callee_scope, new_var.name, var.name, frame)
             var_dict[var.name] = new_var
     debug_print("var_dict = ", var_dict)
     replace_vars(callee_blocks, var_dict)
